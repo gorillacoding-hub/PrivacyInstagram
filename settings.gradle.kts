@@ -1,5 +1,3 @@
-rootProject.name = "gorillainsta-patches"
-
 pluginManagement {
     repositories {
         gradlePluginPortal()
@@ -19,3 +17,5 @@ pluginManagement {
 plugins {
     id("app.morphe.patches") version "1.3.2"
 }
+
+rootProject.name = "gorillainsta-patches"
