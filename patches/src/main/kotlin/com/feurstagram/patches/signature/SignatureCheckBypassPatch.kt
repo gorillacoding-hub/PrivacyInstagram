@@ -50,7 +50,7 @@ val signatureCheckBypassPatch = bytecodePatch(
     description = "Forces Instagram's signing-certificate trust checks to always pass, so a " +
         "re-signed APK is treated as an official Meta build and deep links route to their " +
         "content instead of falling back to the home feed.",
-    default = true,
+    default = false,
 ) {
     compatibleWith(COMPATIBILITY_INSTAGRAM)
 
