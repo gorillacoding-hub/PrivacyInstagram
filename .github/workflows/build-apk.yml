@@ -4,20 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       instagram_apk_url:
-        description: Direct HTTPS download URL for an Instagram APK you are legally allowed to modify
+        description: Direct HTTPS URL for an Instagram APK you are legally allowed to modify
         required: true
         type: string
 
-      apk_format:
-        description: APK file format
+      distribution_authorized:
+        description: I confirm I have the legal right to publicly distribute the resulting APK
         required: true
-        type: choice
-        options:
-          - apk
-          - apkm
-          - xapk
-          - apks
-        default: apk
+        type: boolean
+        default: false
 
       clone:
         description: Build a separate GorillaInsta app alongside stock Instagram
@@ -32,7 +27,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
   packages: read
 
 concurrency:
@@ -41,7 +36,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build and patch Instagram
+    name: Build and publish GorillaInsta
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
@@ -49,7 +44,6 @@ jobs:
       GITHUB_ACTOR: gorillacoding-hub
       GITHUB_TOKEN: ${{ secrets.MORPHE_PACKAGES_TOKEN }}
       APK_URL: ${{ inputs.instagram_apk_url }}
-      APK_FORMAT: ${{ inputs.apk_format }}
       BUILD_CLONE: ${{ inputs.clone }}
       FORCE_PATCHES: ${{ inputs.force }}
       GORILLA_KEYSTORE_BASE64: ${{ secrets.GORILLA_KEYSTORE_BASE64 }}
@@ -58,17 +52,15 @@ jobs:
       GORILLA_KEY_PASSWORD: ${{ secrets.GORILLA_KEY_PASSWORD }}
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Protect proprietary APK output
-        env:
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+      - name: Verify public distribution authorization
         run: |
-          if [ "$REPOSITORY_PRIVATE" != "true" ]; then
-            echo "::error::Make PrivacyInstagram private before building. Artifacts in a public repository are accessible to people with repository read access."
+          if [ "${{ inputs.distribution_authorized }}" != "true" ]; then
+            echo "::error::Public distribution was not authorized."
             exit 1
           fi
+
+      - name: Check out source
+        uses: actions/checkout@v4
 
       - name: Validate inputs and package credentials
         shell: bash
@@ -76,7 +68,8 @@ jobs:
           set -euo pipefail
 
           if [ -z "${GITHUB_TOKEN:-}" ]; then
-            echo "::error::Missing MORPHE_PACKAGES_TOKEN. Add a classic GitHub token with read:packages scope as a repository Actions secret."
+            echo "::error::Missing MORPHE_PACKAGES_TOKEN."
+            echo "Add a GitHub Actions secret with read:packages permission."
             exit 1
           fi
 
@@ -87,13 +80,10 @@ jobs:
           url = urlparse(os.environ["APK_URL"])
 
           if url.scheme != "https" or not url.netloc:
-              raise SystemExit("APK_URL must be a direct HTTPS download URL.")
+              raise SystemExit("APK_URL must be a direct HTTPS URL.")
 
           if url.username or url.password:
               raise SystemExit("Do not embed credentials in APK_URL.")
-
-          if os.environ["APK_FORMAT"] not in {"apk", "apkm", "xapk", "apks"}:
-              raise SystemExit("Unsupported APK format.")
           PY
 
       - name: Set up JDK 21
@@ -135,7 +125,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          APK_PATH="$RUNNER_TEMP/instagram.$APK_FORMAT"
+          APK_PATH="$RUNNER_TEMP/instagram.apk"
 
           curl --fail --location --retry 3 --retry-all-errors \
             --connect-timeout 30 --max-time 1800 \
@@ -155,14 +145,11 @@ jobs:
 
           echo "APK_INPUT=$APK_PATH" >> "$GITHUB_ENV"
 
-          echo "APK archive validated: $SIZE bytes"
-
       - name: Build GorillaInsta patch bundle
         shell: bash
         run: |
           set -euo pipefail
 
-          # gradlew is not executable in the repository.
           bash ./gradlew --no-daemon --stacktrace :patches:build
 
           MPP="$(find patches/build/libs \
@@ -179,8 +166,6 @@ jobs:
           fi
 
           echo "PATCH_BUNDLE=$MPP" >> "$GITHUB_ENV"
-
-          echo "Patch bundle built: $MPP"
 
       - name: Apply GorillaInsta patches
         shell: bash
@@ -219,7 +204,7 @@ jobs:
               --keystore-entry-password "$GORILLA_KEY_PASSWORD"
             )
           else
-            echo "::warning::No persistent signing key configured. Future builds may require uninstalling the previous APK before reinstalling."
+            echo "::warning::No persistent signing key configured."
           fi
 
           java -Xmx6g -jar "$CLI" "${ARGS[@]}"
@@ -228,18 +213,31 @@ jobs:
 
           sha256sum "$OUTPUT" > "$GITHUB_WORKSPACE/SHA256SUMS.txt"
 
-          echo "APK generated:"
           ls -lh "$OUTPUT"
           cat "$GITHUB_WORKSPACE/SHA256SUMS.txt"
 
-      - name: Upload APK and build evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: GorillaInsta-${{ github.run_number }}
-          path: |
-            gorillainsta.apk
-            patch-report.json
-            SHA256SUMS.txt
-            ${{ env.PATCH_BUNDLE }}
-          if-no-files-found: error
-          retention-days: 3
+      - name: Publish public GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="gorillainsta-build-${GITHUB_RUN_NUMBER}"
+
+          gh release create "$TAG" \
+            gorillainsta.apk \
+            SHA256SUMS.txt \
+            patch-report.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "GorillaInsta Build ${GITHUB_RUN_NUMBER}" \
+            --notes "Automated GorillaInsta build.
+
+          APK: gorillainsta.apk
+          Checksum: SHA256SUMS.txt
+          Patch report: patch-report.json
+
+          Verify the SHA256 checksum before installing."
+
+          echo "Release published: $TAG"
