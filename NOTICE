@@ -1,0 +1,14 @@
+GorillaInsta
+============
+
+GorillaInsta is a privacy-oriented fork of Feurstagram
+(https://github.com/jean-voila/FeurStagram), which is licensed under the
+GNU General Public License v3.0.
+
+This distribution contains only the open-source patch toolkit and extension
+sources. It does NOT include Instagram / Meta proprietary binaries.
+
+You must supply your own Instagram APK from a trusted source and build locally.
+Redistributing a patched Instagram APK may violate Meta's copyright and terms.
+
+Upstream copyright and license notices are preserved under LICENSE (GPL-3.0).
