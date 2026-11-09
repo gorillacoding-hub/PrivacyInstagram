@@ -115,8 +115,9 @@ val quoicouviewPatch = bytecodePatch(
     name = "Quoicouview mode",
     description = "Lets the experimental Quoicouview mode put the stories tray at the top of the " +
         "Direct inbox, as a row of the inbox list, open stories from there the way the feed " +
-        "opens them, and reach the story camera from Messages as from Home.",
-    default = true,
+        "opens them, and reach the story camera from Messages as from Home. " +
+        "Disabled by default because Instagram 454 changed its navigator bytecode.",
+    default = false,
 ) {
     compatibleWith(COMPATIBILITY_INSTAGRAM)
 
