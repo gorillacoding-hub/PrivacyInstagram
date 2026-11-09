@@ -1,0 +1,245 @@
+name: Build GorillaInsta APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      instagram_apk_url:
+        description: Direct HTTPS download URL for an Instagram APK you are legally allowed to modify
+        required: true
+        type: string
+
+      apk_format:
+        description: APK file format
+        required: true
+        type: choice
+        options:
+          - apk
+          - apkm
+          - xapk
+          - apks
+        default: apk
+
+      clone:
+        description: Build a separate GorillaInsta app alongside stock Instagram
+        required: true
+        type: boolean
+        default: false
+
+      force:
+        description: Force patches on an unlisted Instagram version (not recommended)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: gorillainsta-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and patch Instagram
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      GITHUB_ACTOR: gorillacoding-hub
+      GITHUB_TOKEN: ${{ secrets.MORPHE_PACKAGES_TOKEN }}
+      APK_URL: ${{ inputs.instagram_apk_url }}
+      APK_FORMAT: ${{ inputs.apk_format }}
+      BUILD_CLONE: ${{ inputs.clone }}
+      FORCE_PATCHES: ${{ inputs.force }}
+      GORILLA_KEYSTORE_BASE64: ${{ secrets.GORILLA_KEYSTORE_BASE64 }}
+      GORILLA_KEYSTORE_PASSWORD: ${{ secrets.GORILLA_KEYSTORE_PASSWORD }}
+      GORILLA_KEY_ALIAS: ${{ secrets.GORILLA_KEY_ALIAS }}
+      GORILLA_KEY_PASSWORD: ${{ secrets.GORILLA_KEY_PASSWORD }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Protect proprietary APK output
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" != "true" ]; then
+            echo "::error::Make PrivacyInstagram private before building. Artifacts in a public repository are accessible to people with repository read access."
+            exit 1
+          fi
+
+      - name: Validate inputs and package credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GITHUB_TOKEN:-}" ]; then
+            echo "::error::Missing MORPHE_PACKAGES_TOKEN. Add a classic GitHub token with read:packages scope as a repository Actions secret."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          url = urlparse(os.environ["APK_URL"])
+
+          if url.scheme != "https" or not url.netloc:
+              raise SystemExit("APK_URL must be a direct HTTPS download URL.")
+
+          if url.username or url.password:
+              raise SystemExit("Do not embed credentials in APK_URL.")
+
+          if os.environ["APK_FORMAT"] not in {"apk", "apkm", "xapk", "apks"}:
+              raise SystemExit("Unsupported APK format.")
+          PY
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Download and verify Morphe CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p tools
+
+          CLI="tools/morphe-desktop-1.11.0-all.jar"
+          URL="https://github.com/MorpheApp/morphe-desktop/releases/download/v1.11.0/morphe-desktop-1.11.0-all.jar"
+          EXPECTED="85c222421f07bb67098d191b9870323199fea871ddab53fcd6de915ca70e5fe6"
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            --connect-timeout 30 --max-time 900 \
+            "$URL" --output "$CLI"
+
+          printf '%s  %s\n' "$EXPECTED" "$CLI" | sha256sum --check -
+
+          java -jar "$CLI" --version
+
+      - name: Download supplied Instagram APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_PATH="$RUNNER_TEMP/instagram.$APK_FORMAT"
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            --connect-timeout 30 --max-time 1800 \
+            --max-filesize 1500000000 \
+            "$APK_URL" --output "$APK_PATH"
+
+          test -s "$APK_PATH"
+
+          SIZE="$(stat -c '%s' "$APK_PATH")"
+
+          if [ "$SIZE" -gt 1500000000 ]; then
+            echo "::error::APK exceeds the 1.5 GB safety limit."
+            exit 1
+          fi
+
+          unzip -tqq "$APK_PATH"
+
+          echo "APK_INPUT=$APK_PATH" >> "$GITHUB_ENV"
+
+          echo "APK archive validated: $SIZE bytes"
+
+      - name: Build GorillaInsta patch bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # gradlew is not executable in the repository.
+          bash ./gradlew --no-daemon --stacktrace :patches:build
+
+          MPP="$(find patches/build/libs \
+            -maxdepth 1 \
+            -type f \
+            -name 'patches-*.mpp' \
+            ! -name '*-sources.mpp' \
+            ! -name '*-javadoc.mpp' \
+            -print -quit)"
+
+          if [ -z "$MPP" ]; then
+            echo "::error::No patches-*.mpp bundle was produced."
+            exit 1
+          fi
+
+          echo "PATCH_BUNDLE=$MPP" >> "$GITHUB_ENV"
+
+          echo "Patch bundle built: $MPP"
+
+      - name: Apply GorillaInsta patches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CLI="tools/morphe-desktop-1.11.0-all.jar"
+          OUTPUT="$GITHUB_WORKSPACE/gorillainsta.apk"
+          REPORT="$GITHUB_WORKSPACE/patch-report.json"
+
+          ARGS=(patch -p "$PATCH_BUNDLE" -o "$OUTPUT" -r "$REPORT")
+
+          if [ "$BUILD_CLONE" = "true" ]; then
+            ARGS+=(
+              -e "Clone"
+              -OpackageName=com.instagram.android.gorillainsta
+              -OappName=GorillaInsta
+            )
+          fi
+
+          if [ "$FORCE_PATCHES" = "true" ]; then
+            ARGS+=(--force)
+          fi
+
+          ARGS+=("$APK_INPUT")
+
+          if [ -n "${GORILLA_KEYSTORE_BASE64:-}" ]; then
+            KEYSTORE="$RUNNER_TEMP/gorillainsta.p12"
+
+            printf '%s' "$GORILLA_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+
+            ARGS+=(
+              --keystore "$KEYSTORE"
+              --keystore-password "$GORILLA_KEYSTORE_PASSWORD"
+              --keystore-entry-alias "$GORILLA_KEY_ALIAS"
+              --keystore-entry-password "$GORILLA_KEY_PASSWORD"
+            )
+          else
+            echo "::warning::No persistent signing key configured. Future builds may require uninstalling the previous APK before reinstalling."
+          fi
+
+          java -Xmx6g -jar "$CLI" "${ARGS[@]}"
+
+          test -s "$OUTPUT"
+
+          sha256sum "$OUTPUT" > "$GITHUB_WORKSPACE/SHA256SUMS.txt"
+
+          echo "APK generated:"
+          ls -lh "$OUTPUT"
+          cat "$GITHUB_WORKSPACE/SHA256SUMS.txt"
+
+      - name: Upload APK and build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: GorillaInsta-${{ github.run_number }}
+          path: |
+            gorillainsta.apk
+            patch-report.json
+            SHA256SUMS.txt
+            ${{ env.PATCH_BUNDLE }}
+          if-no-files-found: error
+          retention-days: 3
